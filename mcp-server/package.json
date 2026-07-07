@@ -1,0 +1,16 @@
+{
+  "name": "chrome-mcp-bridge",
+  "version": "0.1.0",
+  "description": "MCP server that bridges AI clients to a Chrome extension via WebSocket.",
+  "type": "module",
+  "bin": {
+    "chrome-mcp-bridge": "./server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "ws": "^8.18.0"
+  }
+}

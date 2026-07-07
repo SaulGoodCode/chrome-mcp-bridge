@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Chrome MCP Bridge</title>
+  <style>
+    body {
+      width: 280px;
+      margin: 0;
+      font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      padding: 14px;
+      box-sizing: border-box;
+    }
+    h1 { font-size: 14px; margin: 0 0 8px; }
+    .row { display: flex; justify-content: space-between; padding: 4px 0; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+    .on  { background: #4CAF50; }
+    .off { background: #9E9E9E; }
+    code { background: #f1f1f1; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+    .url { font-family: monospace; font-size: 11px; color: #555; word-break: break-all; }
+    button { padding: 6px 10px; border: 0; border-radius: 6px; cursor: pointer; font: 600 12px inherit; }
+    .primary { background: #2196F3; color: white; }
+    .ghost { background: #eee; color: #333; }
+  </style>
+</head>
+<body>
+  <h1>Chrome MCP Bridge</h1>
+  <div class="row">
+    <span><span id="dot" class="dot off"></span>WebSocket</span>
+    <span id="status">未连接</span>
+  </div>
+  <div class="row">
+    <span>Server URL</span>
+    <code id="url">ws://127.0.0.1:8787</code>
+  </div>
+  <div class="row">
+    <span>Active tab</span>
+    <span id="tab" class="url">—</span>
+  </div>
+  <div class="row" style="align-items: center;">
+    <span style="font-weight: 600;">启用桥接</span>
+    <label style="position: relative; display: inline-block; width: 36px; height: 20px;">
+      <input id="enabledToggle" type="checkbox" style="opacity: 0; width: 0; height: 0;">
+      <span id="toggleSlider" style="position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; border-radius: 20px; transition: .3s;">
+        <span style="position: absolute; content: ''; height: 14px; width: 14px; left: 3px; bottom: 3px; background-color: white; border-radius: 50%; transition: .3s;"></span>
+      </span>
+    </label>
+  </div>
+  <div id="disabledHint" style="display: none; color: #999; font-size: 11px; padding: 2px 0;">
+    已禁用：扩展不会连接 MCP server，也不会重试。
+  </div>
+  <div id="autoDisabledHint" style="display: none; color: #FF9800; font-size: 11px; padding: 4px 6px; background: #FFF3E0; border: 1px solid #FFE0B2; border-radius: 4px;">
+    桥接已自动关闭：尝试连接 MCP server 多次失败。请确认 server 已启动后重新打开开关。
+  </div>
+  <div class="row" style="flex-direction: column; align-items: stretch; gap: 4px;">
+    <label for="serverPath" style="font-weight: 600;">MCP server 路径</label>
+    <div style="display: flex; gap: 4px;">
+      <input id="serverPath" type="text" placeholder="C:/path/to/mcp-server/server.js"
+        style="flex: 1; padding: 4px 6px; font: 12px monospace; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;" />
+      <button class="ghost" id="browseBtn" style="padding: 4px 10px; font-size: 12px; white-space: nowrap;">浏览...</button>
+    </div>
+    <span style="color: #999; font-size: 11px;">server.js 的绝对路径，用于生成 MCP 配置</span>
+    <div id="pathHint" style="display: none; font-size: 11px; padding: 2px 0;"></div>
+  </div>
+  <div style="margin-top: 10px; display: flex; gap: 6px;">
+    <button class="primary" id="reconnect">重连</button>
+    <button class="ghost" id="openMcp">复制 MCP 配置</button>
+  </div>
+  <p style="margin-top: 12px; color: #666; font-size: 11px;">
+    提示：在 AI 客户端的 MCP 配置中指向本机 MCP server 即可控制此 Chrome。
+  </p>
+  <script src="popup.js"></script>
+</body>
+</html>

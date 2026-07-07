@@ -1,0 +1,101 @@
+# ─── Node.js (mcp-server) ─────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm
+.pnpm-store/
+yarn.lock
+pnpm-lock.yaml
+# 保留 package-lock.json 以锁定依赖版本
+
+# ─── Python (extension/generate_icon.py) ─────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── IDE & Editors ────────────────────────────────────
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project
+.project
+.classpath
+.settings/
+
+# ─── Operating System ─────────────────────────────────
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+
+# Linux
+*~
+.directory
+.Trash-*
+
+# ─── Trae IDE 临时文件（保留 skill 定义） ────────────
+.trae/
+
+# ─── 日志与临时输出 ───────────────────────────────────
+*.log
+logs/
+*.tmp
+*.bak
+*.swp
+*.old
+
+# smoke-test 可能产生的临时输出
+mcp-server/*.out
+mcp-server/*.err
+
+# ─── 环境变量与密钥 ───────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# ─── 构建产物（预留） ─────────────────────────────────
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# ─── 测试覆盖率 ──────────────────────────────────────
+coverage/
+.nyc_output/
+.coverage
+
+# ─── 其他 ─────────────────────────────────────────────
+.cache/
+.eslintcache
+.stylelintcache

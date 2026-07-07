@@ -9,6 +9,7 @@
   window.__mcpLastNetwork = Date.now();
   window.__mcpActiveRequests = 0;
   window.__mcpNetworkLog = [];
+  window.__mcpNetworkReadCursor = 0;
 
   function push(e) {
     var log = window.__mcpNetworkLog;

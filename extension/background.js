@@ -340,18 +340,42 @@ async function dispatch(method, params) {
           world: "MAIN",
           args: [params],
           func: (p) => {
-            const count = Math.min(Math.max(p?.count || 50, 1), 200);
+            const count = Math.min(Math.max(p?.count ?? 10, 1), 200);
             const log = window.__mcpNetworkLog || [];
-            const slice = log.slice(-count);
+            const fullUrl = p?.fullUrl === true;
+            const urlPattern = p?.urlPattern || null;
+            const sinceLast = p?.sinceLastCall === true;
+
+            let re = null;
+            if (urlPattern) { try { re = new RegExp(urlPattern); } catch (e) {} }
+            function matches(e) {
+              if (!urlPattern) return true;
+              return re ? re.test(e.url) : e.url.includes(urlPattern);
+            }
+            function fmt(e) {
+              let url = e.url;
+              if (!fullUrl) {
+                try { const u = new URL(e.url); url = u.pathname + u.search; } catch (x) {}
+              }
+              return { type: e.type, method: e.method, url, status: e.status, duration: e.duration, error: e.error || null };
+            }
+
+            let slice;
+            if (sinceLast) {
+              const cursor = window.__mcpNetworkReadCursor || 0;
+              slice = log.slice(cursor).filter(matches);
+            } else {
+              slice = log.slice(-count).filter(matches);
+            }
+            // Always advance cursor to end of log (regardless of filter)
+            window.__mcpNetworkReadCursor = log.length;
+
             return {
               ok: true,
               count: slice.length,
               totalTracked: log.length,
               activeRequests: window.__mcpActiveRequests || 0,
-              entries: slice.map((e) => ({
-                id: e.id, type: e.type, method: e.method, url: e.url,
-                status: e.status, duration: e.duration, error: e.error || null
-              }))
+              entries: slice.map(fmt)
             };
           }
         });

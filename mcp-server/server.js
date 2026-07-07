@@ -362,12 +362,17 @@ const TOOLS = [
     name: "chrome_get_network_log",
     description:
       "Return recent XHR/fetch requests from the page's network activity log. " +
-      "Entries include id, type (fetch/xhr), method, url, status, duration (ms), and error (if any). " +
-      "Use this to inspect what API calls the page has made after an action — critical for SPA debugging.",
+      "By default returns the last 10 entries as compact paths (e.g. '/api/v1/users' instead of full URLs) " +
+      "to save tokens. Use sinceLastCall=true to only get NEW requests since the previous call (best for " +
+      "checking 'what happened after my last click'). Use urlPattern to filter by URL substring/regex. " +
+      "Entries: type, method, url (path by default), status, duration(ms), error.",
     inputSchema: {
       type: "object",
       properties: {
-        count: { type: "number", default: 50, description: "Number of most recent entries to return (max 200)." }
+        count: { type: "number", description: "Max entries to return (default 10, max 200). Ignored when sinceLastCall=true." },
+        sinceLastCall: { type: "boolean", default: false, description: "Only return requests that arrived AFTER the previous get_network_log call. Saves tokens — second call typically returns 0-3 new entries." },
+        urlPattern: { type: "string", description: "Filter by URL substring or regex (e.g. 'api/orders' or 'POST'). Matches against full URL." },
+        fullUrl: { type: "boolean", default: false, description: "Return full URLs instead of paths (default: path only to save tokens)." }
       }
     }
   },
@@ -434,7 +439,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       timeout: args.timeout,
       pollInterval: args.pollInterval
     }; break;
-    case "chrome_get_network_log": method = "get_network_log"; params = { count: args.count }; break;
+    case "chrome_get_network_log": method = "get_network_log"; params = {
+      count: args.count,
+      sinceLastCall: args.sinceLastCall,
+      urlPattern: args.urlPattern,
+      fullUrl: args.fullUrl
+    }; break;
     case "chrome_wait_for_request": method = "wait_for_request"; params = {
       urlPattern: args.urlPattern,
       method: args.method,

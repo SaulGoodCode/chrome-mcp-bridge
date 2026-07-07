@@ -191,6 +191,144 @@ async function dispatch(method, params) {
 
     case "hover":
       return await sendToActiveTab({ type: "HOVER", ref: params.ref });
+    case "wait_for":
+      // Implement waiting entirely in the service worker via chrome.scripting.executeScript.
+      // This bypasses any listener routing issues with async sendResponse in MV3.
+      // Refs are resolved via data-mcp-ref attributes set by accessibility.js.
+      try {
+        const tab = await getActiveTab();
+        const injected = await chrome.scripting.executeScript({
+          target: { tabId: tab.id, allFrames: false },
+          args: [params],
+          func: async (p) => {
+            // p: { ref, state, selector, countOp, countValue, text, networkIdleMs, timeout, pollInterval }
+            const start = Date.now();
+            const timeout = Math.min(Math.max(p.timeout ?? 10000, 0), 60000);
+            const pollInterval = Math.min(Math.max(p.pollInterval ?? 100, 50), 1000);
+
+            function getElByRef(ref) {
+              if (!ref) return null;
+              try {
+                return document.querySelector(`[data-mcp-ref="${CSS.escape(ref)}"]`);
+              } catch (e) {
+                return null;
+              }
+            }
+
+            function isVisible(el) {
+              if (!el) return false;
+              const rect = el.getBoundingClientRect();
+              if (rect.width <= 0 || rect.height <= 0) return false;
+              const style = window.getComputedStyle(el);
+              if (style.display === "none" || style.visibility === "hidden") return false;
+              if (parseFloat(style.opacity) === 0) return false;
+              return true;
+            }
+
+            function checkSelectorCount() {
+              if (!p.selector) return null;
+              try {
+                return document.querySelectorAll(p.selector).length;
+              } catch (e) {
+                return null;
+              }
+            }
+
+            function checkText() {
+              if (!p.text) return null;
+              const txt = (document.body && document.body.innerText) || "";
+              return txt.indexOf(p.text) !== -1;
+            }
+
+            function checkNetworkIdle() {
+              if (!p.networkIdleMs) return null;
+              // Require both: (1) idle for networkIdleMs, (2) no in-flight requests
+              const idle = Date.now() - (window.__mcpLastNetwork || 0);
+              const active = window.__mcpActiveRequests || 0;
+              return idle >= p.networkIdleMs && active === 0;
+            }
+
+            function evaluate() {
+              const results = {};
+
+              // ref state check
+              if (p.ref && p.state) {
+                const el = getElByRef(p.ref);
+                if (p.state === "visible") results.refVisible = isVisible(el);
+                else if (p.state === "hidden") results.refHidden = !isVisible(el);
+                else if (p.state === "gone") results.refGone = !el;
+                else if (p.state === "present") results.refPresent = !!el;
+              }
+
+              // selector count check
+              if (p.selector && p.countOp && p.countValue !== undefined) {
+                const c = checkSelectorCount();
+                if (c === null) results.countError = true;
+                else {
+                  const v = p.countValue;
+                  if (p.countOp === "==") results.countEq = (c === v);
+                  else if (p.countOp === ">=") results.countGe = (c >= v);
+                  else if (p.countOp === "<=") results.countLe = (c <= v);
+                  else if (p.countOp === ">")  results.countGt = (c > v);
+                  else if (p.countOp === "<")  results.countLt = (c < v);
+                }
+              }
+
+              // text check
+              if (p.text) {
+                results.textPresent = checkText();
+              }
+
+              // network idle check
+              if (p.networkIdleMs) {
+                results.networkIdle = checkNetworkIdle();
+              }
+
+              return results;
+            }
+
+            function allSatisfied(results) {
+              const keys = Object.keys(results);
+              if (keys.length === 0) return true;
+              for (const k of keys) {
+                if (!results[k]) return false;
+              }
+              return true;
+            }
+
+            // Poll loop
+            while (Date.now() - start < timeout) {
+              try {
+                const results = evaluate();
+                if (allSatisfied(results)) {
+                  return {
+                    ok: true,
+                    elapsed: Date.now() - start,
+                    results,
+                    currentUrl: location.href
+                  };
+                }
+              } catch (e) {
+                // ignore transient errors
+              }
+              await new Promise((r) => setTimeout(r, pollInterval));
+            }
+
+            // Timeout reached
+            return {
+              ok: false,
+              error: "Timed out waiting for condition",
+              elapsed: Date.now() - start,
+              results: evaluate(),
+              currentUrl: location.href
+            };
+          }
+        });
+        const result = injected && injected[0] && injected[0].result;
+        return result || { ok: false, error: "No result returned from injected function" };
+      } catch (e) {
+        return { ok: false, error: e.message || String(e) };
+      }
 
     default:
       throw new Error(`Unknown method: ${method}`);

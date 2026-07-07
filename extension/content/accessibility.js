@@ -94,11 +94,17 @@
     if (r) {
       // Verify still valid
       const w = refToEl.get(r);
-      if (w && w.deref() === el) return r;
+      if (w && w.deref() === el) {
+        // Refresh dataset marker (in case DOM was replaced)
+        try { el.dataset.mcpRef = r; } catch (e) {}
+        return r;
+      }
     }
     r = `ref_${counter++}`;
     refToEl.set(r, new WeakRef(el));
     elToRef.set(el, r);
+    // Also mark on DOM so isolated-world scripts (e.g. executeScript) can resolve ref
+    try { el.dataset.mcpRef = r; } catch (e) {}
     return r;
   }
 

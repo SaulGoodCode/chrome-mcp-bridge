@@ -330,6 +330,33 @@ const TOOLS = [
       },
       required: ["ref"]
     }
+  },
+  {
+    name: "chrome_wait_for",
+    description:
+      "Wait for a condition to be met on the page, then return. " +
+      "Solves the classic SPA problem of acting before the page is ready — no more brittle sleeps. " +
+      "Supports 5 condition types (pass exactly one):\n" +
+      "  1. ref + state=\"visible\" (default) — wait for ref_id element to be visible.\n" +
+      "  2. ref + state=\"hidden\" — wait for ref_id element to disappear/become hidden.\n" +
+      "  3. selector + countOp + countValue — wait until document.querySelectorAll(selector).length matches countOp (\"==\", \">=\", \"<=\", \">\") against countValue.\n" +
+      "  4. text (+ optional selector scope) — wait until the textContent of the scope (default document.body) contains the given substring.\n" +
+      "  5. networkIdleMs — wait until at least this many ms have elapsed since the last network resource request completed.\n" +
+      "All conditions use a default timeout of 10000ms (configurable). On timeout returns { success: false, timedOut: true }.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ref: { type: "string", description: "Optional ref_id to wait for (use with state)." },
+        state: { type: "string", enum: ["visible", "hidden"], default: "visible", description: "Whether to wait for ref to appear (visible) or disappear (hidden)." },
+        selector: { type: "string", description: "CSS selector for count-based or text-scoped conditions." },
+        countOp: { type: "string", enum: ["==", ">=", "<=", ">"], description: "Comparison operator for selector count condition." },
+        countValue: { type: "number", description: "Target count to compare against." },
+        text: { type: "string", description: "Substring to search for in the scope's textContent." },
+        networkIdleMs: { type: "number", description: "Wait for at least N ms of no network activity." },
+        timeout: { type: "number", default: 10000, description: "Overall timeout in milliseconds." },
+        pollInterval: { type: "number", default: 100, description: "Polling interval in milliseconds." }
+      }
+    }
   }
 ];
 
@@ -366,12 +393,27 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     case "chrome_get_attributes": method = "get_attributes";  params = { ref: args.ref }; break;
     case "chrome_press_key":      method = "press_key";       params = { ref: args.ref, key: args.key, modifiers: args.modifiers }; break;
     case "chrome_hover":          method = "hover";           params = { ref: args.ref }; break;
+    case "chrome_wait_for":       method = "wait_for";        params = {
+      ref: args.ref,
+      state: args.state,
+      selector: args.selector,
+      countOp: args.countOp,
+      countValue: args.countValue,
+      text: args.text,
+      networkIdleMs: args.networkIdleMs,
+      timeout: args.timeout,
+      pollInterval: args.pollInterval
+    }; break;
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
 
   try {
-    const result = await sendToExtension(method, params, 30000);
+    // wait_for may need longer than 30s — use the user's timeout + 2s buffer.
+    const rpcTimeout = name === "chrome_wait_for"
+      ? Math.max(30000, (args.timeout || 10000) + 2000)
+      : 30000;
+    const result = await sendToExtension(method, params, rpcTimeout);
     // For screenshot, return as image content
     if (name === "chrome_screenshot" && result?.image) {
       const base64 = String(result.image).replace(/^data:image\/png;base64,/, "");

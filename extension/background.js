@@ -155,9 +155,7 @@ async function dispatch(method, params) {
     case "activate_tab":
       return await chrome.tabs.update(params.tabId, { active: true }).then(() => ({ success: true }));
     case "navigate": {
-      const tab = await getActiveTab();
-      await chrome.tabs.update(tab.id, { url: params.url });
-      // Wait for the tab to finish loading (best-effort, 15s timeout)
+      const tab = await chrome.tabs.create({ url: params.url });
       await waitForTabComplete(tab.id, 15000);
       return { success: true, url: params.url, title: (await chrome.tabs.get(tab.id)).title };
     }

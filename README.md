@@ -8,7 +8,7 @@
 
 ## ✨ 特性
 
-- **18 个 MCP 工具**：覆盖导航、元素操作、表单、键盘、鼠标、截图、标签页、文件上传、智能等待等场景
+- **20 个 MCP 工具**：覆盖导航、元素操作、表单、键盘、鼠标、截图、标签页、文件上传、智能等待、网络观测等场景
 - **零依赖部署**：MCP server 仅依赖 `@modelcontextprotocol/sdk` 和 `ws`；扩展纯原生 JS，无构建步骤
 - **跨客户端**：任何支持 MCP 的 AI 客户端都能用同一份配置接入
 - **稳定 ref_id 系统**：基于 ARIA 角色和可见性构建可访问性树，元素 ref 在同一页面会话内稳定，跨操作可复用
@@ -18,6 +18,7 @@
 - **元素级截图**：`chrome_screenshot` 支持传 `ref` 只截元素 bounding box，节省 token
 - **CDP 文件上传**：`chrome_upload_file` 通过 Chrome DevTools Protocol 处理 `<input type="file">`，兼容各种隐藏 file input
 - **智能等待**：`chrome_wait_for` 轮询等待元素出现/消失、文本出现、选择器数量变化、网络空闲，解决 SPA 路由切换和 AJAX 加载的时序问题，组合条件自动 AND
+- **网络观测**：`chrome_get_network_log` 返回最近 XHR/fetch 请求列表（URL/method/status/duration），`chrome_wait_for_request` 等待特定 API 请求完成，让 AI 能"看见"页面背后的网络活动，验证表单提交是否真的发出
 
 ---
 
@@ -46,7 +47,8 @@ Chrome 扩展 (MV3: background.js + content scripts + popup)
 │   ├── manifest.json         # 扩展清单
 │   ├── content/
 │   │   ├── accessibility.js  # 构建可访问性树、生成 ref_id、search
-│   │   ├── bridge.js         # DOM 操作：click/fill/scroll/press_key/hover/screenshot 等 + 网络活动跟踪
+│   │   ├── network-hook.js   # MAIN world fetch/XHR 拦截（网络日志 & 空闲检测）
+│   │   ├── bridge.js         # DOM 操作：click/fill/scroll/press_key/hover/screenshot 等
 │   │   └── indicator.js      # 高亮框（脉冲边框，跟随滚动）
 │   ├── popup/
 │   │   ├── popup.html        # 扩展弹窗 UI
@@ -117,7 +119,7 @@ chrome_list_tabs
 
 ## 🛠 可用工具
 
-共 18 个工具，按用途分组：
+共 20 个工具，按用途分组：
 
 ### 标签页与导航
 
@@ -175,6 +177,17 @@ chrome_list_tabs
 - `text`：等待页面包含某段文本
 - `networkIdleMs`：等待网络空闲指定毫秒数（fetch/XHR 活动停止 + 无活跃请求）
 - `timeout`：总超时（默认 10s，最大 60s），超时返回 `{ok:false, error, results}`
+
+### 网络观测
+
+| 工具 | 说明 | 关键参数 |
+|---|---|---|
+| `chrome_get_network_log` | 返回最近 N 条 XHR/fetch 请求记录 | `count`（默认 50，最大 200） |
+| `chrome_wait_for_request` | 等待匹配 URL 模式的请求完成（status 返回） | `urlPattern`, `method`（可选）, `timeout`（默认 15s） |
+
+**返回字段**（每条请求）：`id`、`type`（fetch/xhr）、`method`、`url`、`status`（HTTP 状态码，null=进行中）、`duration`（ms）、`error`（失败时）。
+
+`urlPattern` 支持普通子串匹配或正则表达式（如 `api/orders` 或 `^https://api\.example\.com/.*`）。网络拦截通过 MAIN world content script 在 `document_start` 注入，能捕获页面自身发出的所有 fetch/XHR 请求（无 CDP 黄色调试条）。
 
 ---
 
@@ -244,6 +257,25 @@ chrome_list_tabs
 2. chrome_wait_for selector=".result-item" countOp=">=" countValue=10 networkIdleMs=300
    → 等至少 10 条结果渲染且网络空闲
 3. chrome_get_attributes ref=ref_firstItem       → 读取第一条数据
+```
+
+### 示例 9：查看页面发出了哪些 API 请求
+
+```
+1. chrome_navigate url=https://example.com/dashboard
+2. chrome_wait_for networkIdleMs=500              → 等初始加载完成
+3. chrome_get_network_log count=20
+   → 返回最近 20 条请求，含 /api/user、/api/notifications、/api/dashboard 等
+```
+
+### 示例 10：验证表单提交是否真的发出了请求
+
+```
+1. chrome_fill ref=ref_formName value="测试项目"
+2. chrome_click ref=ref_submitBtn                  → 点击提交
+3. chrome_wait_for_request urlPattern="api/projects" method="POST" timeout=10000
+   → 等待 POST /api/projects 完成，返回 {ok:true, entry:{status:201, duration:234}}
+4. chrome_get_network_log count=5                  → 确认请求状态
 ```
 
 ---

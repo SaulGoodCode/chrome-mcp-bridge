@@ -4,41 +4,9 @@
 (() => {
   if (globalThis.__mcpBridge) return;
 
-  // ─── Network activity tracking ────────────────────────────────────
-  // Maintain a timestamp of the most recent fetch/XHR activity so that
-  // wait_for(networkIdleMs) can detect when the page has gone quiet.
-  // Stored on window so isolated-world scripts (executeScript) can read it.
-  globalThis.__mcpLastNetwork = Date.now();
-  globalThis.__mcpActiveRequests = 0;
-
-  const _origFetch = globalThis.fetch;
-  if (_origFetch) {
-    globalThis.fetch = function (...args) {
-      globalThis.__mcpLastNetwork = Date.now();
-      globalThis.__mcpActiveRequests = (globalThis.__mcpActiveRequests || 0) + 1;
-      return _origFetch.apply(this, args).finally(() => {
-        globalThis.__mcpLastNetwork = Date.now();
-        globalThis.__mcpActiveRequests = Math.max(0, (globalThis.__mcpActiveRequests || 0) - 1);
-      });
-    };
-  }
-
-  const _origXhrOpen = XMLHttpRequest.prototype.open;
-  const _origXhrSend = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-    this.__mcpMethod = method;
-    this.__mcpUrl = url;
-    return _origXhrOpen.call(this, method, url, ...rest);
-  };
-  XMLHttpRequest.prototype.send = function (body) {
-    globalThis.__mcpLastNetwork = Date.now();
-    globalThis.__mcpActiveRequests = (globalThis.__mcpActiveRequests || 0) + 1;
-    this.addEventListener("loadend", () => {
-      globalThis.__mcpLastNetwork = Date.now();
-      globalThis.__mcpActiveRequests = Math.max(0, (globalThis.__mcpActiveRequests || 0) - 1);
-    });
-    return _origXhrSend.call(this, body);
-  };
+  // Network tracking is installed by content/network-hook.js (MAIN world, document_start),
+  // which writes to window.__mcpNetworkLog / __mcpLastNetwork / __mcpActiveRequests.
+  // These window properties are readable from isolated-world executeScript calls.
 
   function getPageText(maxChars = 50000) {
     const candidates = [

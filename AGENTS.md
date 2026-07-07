@@ -59,7 +59,7 @@ node server.js
   ```
   配置后**必须重启 AI 客户端**才能识别 chrome_* 工具。
 
-## 可用工具清单（12 个）
+## 可用工具清单（20 个）
 
 | 工具 | 用途 | 关键参数 |
 |---|---|---|
@@ -75,9 +75,15 @@ node server.js
 | `chrome_new_tab` | 新建标签页 | `url`（可选） |
 | `chrome_close_tab` | 关闭标签页 | `tabId` |
 | `chrome_activate_tab` | 激活标签页 | `tabId` |
-| `chrome_upload_file` | 上传本地文件到 `<input type=file>` | `files`（绝对路径数组），`ref` 可选 |
+| `chrome_upload_file` | 上传本地文件到 `<input type=file>`（CDP） | `files`（绝对路径数组），`ref` 可选 |
 | `chrome_highlight` | 用脉冲边框高亮元素，便于调试 | `ref` |
 | `chrome_clear_highlight` | 清除高亮 | — |
+| `chrome_get_attributes` | 获取元素属性 | `ref` |
+| `chrome_press_key` | 模拟键盘按键 | `ref`, `key`, `modifiers` |
+| `chrome_hover` | 鼠标悬停元素 | `ref` |
+| `chrome_wait_for` | 智能等待（ref/selector/text/network idle） | `ref`+`state`, `selector`+`countOp`+`countValue`, `text`, `networkIdleMs`, `timeout` |
+| `chrome_get_network_log` | 返回最近 N 条 XHR/fetch 请求 | `count` |
+| `chrome_wait_for_request` | 等待特定 URL 模式的请求完成 | `urlPattern`, `method`, `timeout` |
 
 ## 标准操作范式
 

@@ -194,11 +194,13 @@ async function dispatch(method, params) {
     case "wait_for":
       // Implement waiting entirely in the service worker via chrome.scripting.executeScript.
       // This bypasses any listener routing issues with async sendResponse in MV3.
-      // Refs are resolved via data-mcp-ref attributes set by accessibility.js.
+      // Runs in MAIN world to read __mcpNetworkLog/__mcpLastNetwork set by network-hook.js.
+      // Refs are resolved via data-mcp-ref DOM attributes (shared across worlds).
       try {
         const tab = await getActiveTab();
         const injected = await chrome.scripting.executeScript({
           target: { tabId: tab.id, allFrames: false },
+          world: "MAIN",
           args: [params],
           func: async (p) => {
             // p: { ref, state, selector, countOp, countValue, text, networkIdleMs, timeout, pollInterval }
@@ -326,6 +328,89 @@ async function dispatch(method, params) {
         });
         const result = injected && injected[0] && injected[0].result;
         return result || { ok: false, error: "No result returned from injected function" };
+      } catch (e) {
+        return { ok: false, error: e.message || String(e) };
+      }
+
+    case "get_network_log":
+      try {
+        const tab = await getActiveTab();
+        const injected = await chrome.scripting.executeScript({
+          target: { tabId: tab.id, allFrames: false },
+          world: "MAIN",
+          args: [params],
+          func: (p) => {
+            const count = Math.min(Math.max(p?.count || 50, 1), 200);
+            const log = window.__mcpNetworkLog || [];
+            const slice = log.slice(-count);
+            return {
+              ok: true,
+              count: slice.length,
+              totalTracked: log.length,
+              activeRequests: window.__mcpActiveRequests || 0,
+              entries: slice.map((e) => ({
+                id: e.id, type: e.type, method: e.method, url: e.url,
+                status: e.status, duration: e.duration, error: e.error || null
+              }))
+            };
+          }
+        });
+        return injected?.[0]?.result || { ok: false, error: "No result returned" };
+      } catch (e) {
+        return { ok: false, error: e.message || String(e) };
+      }
+
+    case "wait_for_request":
+      try {
+        const tab = await getActiveTab();
+        const injected = await chrome.scripting.executeScript({
+          target: { tabId: tab.id, allFrames: false },
+          world: "MAIN",
+          args: [params],
+          func: async (p) => {
+            const urlPattern = p?.urlPattern;
+            if (!urlPattern) return { ok: false, error: "urlPattern is required" };
+            const timeout = Math.min(Math.max(p?.timeout || 15000, 0), 60000);
+            const pollInterval = Math.min(Math.max(p?.pollInterval || 100, 50), 1000);
+            const method = p?.method ? String(p.method).toUpperCase() : null;
+            const start = Date.now();
+            let re;
+            try { re = new RegExp(urlPattern); } catch (e) { re = null; }
+            function matches(e) {
+              if (e.status === null) return false; // still in-flight
+              if (method && e.method !== method) return false;
+              return re ? re.test(e.url) : e.url.includes(urlPattern);
+            }
+            // Check existing entries first
+            const log = () => window.__mcpNetworkLog || [];
+            let found = log().find(matches);
+            if (found) {
+              return {
+                ok: true, elapsed: Date.now() - start,
+                entry: { id: found.id, type: found.type, method: found.method, url: found.url, status: found.status, duration: found.duration, error: found.error || null }
+              };
+            }
+            const seenIds = new Set(log().map((e) => e.id));
+            while (Date.now() - start < timeout) {
+              await new Promise((r) => setTimeout(r, pollInterval));
+              const entries = log();
+              for (let i = entries.length - 1; i >= 0; i--) {
+                const e = entries[i];
+                if (seenIds.has(e.id)) break; // reached entries we already checked
+                if (matches(e)) {
+                  return {
+                    ok: true, elapsed: Date.now() - start,
+                    entry: { id: e.id, type: e.type, method: e.method, url: e.url, status: e.status, duration: e.duration, error: e.error || null }
+                  };
+                }
+              }
+              seenIds.clear();
+              for (const e of entries) seenIds.add(e.id);
+            }
+            return { ok: false, error: `Timed out waiting for request matching "${urlPattern}"`, elapsed: Date.now() - start };
+          }
+        });
+        return injected?.[0]?.result || { ok: false, error: "No result returned" };
       } catch (e) {
         return { ok: false, error: e.message || String(e) };
       }

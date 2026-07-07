@@ -357,6 +357,36 @@ const TOOLS = [
         pollInterval: { type: "number", default: 100, description: "Polling interval in milliseconds." }
       }
     }
+  },
+  {
+    name: "chrome_get_network_log",
+    description:
+      "Return recent XHR/fetch requests from the page's network activity log. " +
+      "Entries include id, type (fetch/xhr), method, url, status, duration (ms), and error (if any). " +
+      "Use this to inspect what API calls the page has made after an action — critical for SPA debugging.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        count: { type: "number", default: 50, description: "Number of most recent entries to return (max 200)." }
+      }
+    }
+  },
+  {
+    name: "chrome_wait_for_request",
+    description:
+      "Wait until a specific XHR/fetch request matching urlPattern completes (returns with status). " +
+      "urlPattern can be a plain substring or a regex pattern (e.g. 'api/orders' or '^https://api\\.example\\.com/.*'). " +
+      "Optionally filter by HTTP method. Returns the matched request entry with status/duration, or {ok:false} on timeout.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        urlPattern: { type: "string", description: "Substring or regex to match against request URLs." },
+        method: { type: "string", description: "Optional HTTP method filter (GET/POST/PUT/DELETE/PATCH, case-insensitive)." },
+        timeout: { type: "number", default: 15000, description: "Timeout in milliseconds (default 15s, max 60s)." },
+        pollInterval: { type: "number", default: 100, description: "Poll interval in milliseconds." }
+      },
+      required: ["urlPattern"]
+    }
   }
 ];
 
@@ -404,14 +434,21 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       timeout: args.timeout,
       pollInterval: args.pollInterval
     }; break;
+    case "chrome_get_network_log": method = "get_network_log"; params = { count: args.count }; break;
+    case "chrome_wait_for_request": method = "wait_for_request"; params = {
+      urlPattern: args.urlPattern,
+      method: args.method,
+      timeout: args.timeout,
+      pollInterval: args.pollInterval
+    }; break;
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
 
   try {
-    // wait_for may need longer than 30s — use the user's timeout + 2s buffer.
-    const rpcTimeout = name === "chrome_wait_for"
-      ? Math.max(30000, (args.timeout || 10000) + 2000)
+    // wait_* tools may need longer than 30s — use the user's timeout + 2s buffer.
+    const rpcTimeout = (name === "chrome_wait_for" || name === "chrome_wait_for_request")
+      ? Math.max(30000, (args.timeout || (name === "chrome_wait_for_request" ? 15000 : 10000)) + 2000)
       : 30000;
     const result = await sendToExtension(method, params, rpcTimeout);
     // For screenshot, return as image content

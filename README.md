@@ -8,7 +8,7 @@
 
 ## ✨ 特性
 
-- **17 个 MCP 工具**：覆盖导航、元素操作、表单、键盘、鼠标、截图、标签页、文件上传等场景
+- **18 个 MCP 工具**：覆盖导航、元素操作、表单、键盘、鼠标、截图、标签页、文件上传、智能等待等场景
 - **零依赖部署**：MCP server 仅依赖 `@modelcontextprotocol/sdk` 和 `ws`；扩展纯原生 JS，无构建步骤
 - **跨客户端**：任何支持 MCP 的 AI 客户端都能用同一份配置接入
 - **稳定 ref_id 系统**：基于 ARIA 角色和可见性构建可访问性树，元素 ref 在同一页面会话内稳定，跨操作可复用
@@ -17,6 +17,7 @@
 - **智能重连**：指数退避重连 + 自动放弃 + 一键总开关，避免无 server 时的资源浪费
 - **元素级截图**：`chrome_screenshot` 支持传 `ref` 只截元素 bounding box，节省 token
 - **CDP 文件上传**：`chrome_upload_file` 通过 Chrome DevTools Protocol 处理 `<input type="file">`，兼容各种隐藏 file input
+- **智能等待**：`chrome_wait_for` 轮询等待元素出现/消失、文本出现、选择器数量变化、网络空闲，解决 SPA 路由切换和 AJAX 加载的时序问题，组合条件自动 AND
 
 ---
 
@@ -45,7 +46,7 @@ Chrome 扩展 (MV3: background.js + content scripts + popup)
 │   ├── manifest.json         # 扩展清单
 │   ├── content/
 │   │   ├── accessibility.js  # 构建可访问性树、生成 ref_id、search
-│   │   ├── bridge.js         # DOM 操作：click/fill/scroll/press_key/hover/screenshot 等
+│   │   ├── bridge.js         # DOM 操作：click/fill/scroll/press_key/hover/screenshot 等 + 网络活动跟踪
 │   │   └── indicator.js      # 高亮框（脉冲边框，跟随滚动）
 │   ├── popup/
 │   │   ├── popup.html        # 扩展弹窗 UI
@@ -116,7 +117,7 @@ chrome_list_tabs
 
 ## 🛠 可用工具
 
-共 17 个工具，按用途分组：
+共 18 个工具，按用途分组：
 
 ### 标签页与导航
 
@@ -160,6 +161,20 @@ chrome_list_tabs
 | 工具 | 说明 | 关键参数 |
 |---|---|---|
 | `chrome_upload_file` | 通过 CDP 上传本地文件到 `<input type=file>` | `files`, `ref` |
+
+### 等待与同步
+
+| 工具 | 说明 | 关键参数 |
+|---|---|---|
+| `chrome_wait_for` | 轮询等待条件满足后返回（SPA 路由/AJAX/动画） | `ref`+`state`, `selector`+`countOp`+`countValue`, `text`, `networkIdleMs`, `timeout` |
+
+**条件说明**（可组合，AND 语义）：
+
+- `ref` + `state`：等待元素变为 `visible`/`hidden`/`gone`/`present`
+- `selector` + `countOp`（`==`/`>=`/`<=`/`>`/`<`）+ `countValue`：等待 CSS 选择器匹配数量
+- `text`：等待页面包含某段文本
+- `networkIdleMs`：等待网络空闲指定毫秒数（fetch/XHR 活动停止 + 无活跃请求）
+- `timeout`：总超时（默认 10s，最大 60s），超时返回 `{ok:false, error, results}`
 
 ---
 
@@ -212,6 +227,25 @@ chrome_list_tabs
 3. chrome_get_tree selector="nav.dropdown"  → 获取展开后的菜单项
 ```
 
+### 示例 7：SPA 路由切换后等待页面加载
+
+```
+1. chrome_search query="发布商机" role="link"   → 找到 [ref_7] link
+2. chrome_click ref=ref_7                         → 触发 SPA 路由跳转
+3. chrome_wait_for text="完善以下信息" networkIdleMs=500 timeout=10000
+   → 等表单说明文本出现 + 网络空闲 500ms，返回 {ok:true, elapsed: ...}
+4. chrome_get_tree                                → 现在安全操作表单
+```
+
+### 示例 8：等列表加载完成（元素数量 + 网络空闲）
+
+```
+1. chrome_click ref=ref_searchBtn
+2. chrome_wait_for selector=".result-item" countOp=">=" countValue=10 networkIdleMs=300
+   → 等至少 10 条结果渲染且网络空闲
+3. chrome_get_attributes ref=ref_firstItem       → 读取第一条数据
+```
+
 ---
 
 ## 🎛 扩展 Popup
@@ -242,6 +276,7 @@ chrome_list_tabs
 | `EADDRINUSE: address already in use 8787` | 旧 server 进程残留 | 关闭 Trae/Claude MCP 开关再开；或 `taskkill /F /PID <pid>` |
 | badge 一直 OFF | SW 休眠未唤醒 | 点扩展图标激活 |
 | 调用挂起到 30 秒超时 | 页面卡死或元素不可见 | 用 `chrome_search` 重新定位 |
+| `chrome_wait_for` 超时返回 `{ok:false}` | 条件文本/选择器写错或页面未加载 | 查看返回的 `results` 字段诊断哪个条件未满足；先用 `chrome_get_text` 确认实际页面文字 |
 
 ---
 

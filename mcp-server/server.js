@@ -1,12 +1,16 @@
-// Chrome MCP Bridge — MCP server
-// Bridges MCP stdio clients (Claude Desktop, Trae, Cursor, etc.) to a Chrome
-// extension connected via WebSocket.
+// Chrome MCP Bridge — MCP server (daemon + proxy architecture)
+//
+// Supports multiple AI clients switching seamlessly without killing each other.
 //
 // Architecture:
-//   MCP client <stdio> this server <ws://127.0.0.1:8787> Chrome extension
+//   AI client A <stdio> proxy A ─┐
+//   AI client B <stdio> proxy B ─┼─ws:8788→ daemon ─ws:8787→ Chrome extension
+//   AI client C <stdio> proxy C ─┘
 //
-// Each MCP tool call is forwarded to the extension as a JSON-RPC-like request
-// and the response is awaited via a Promise keyed by request id.
+// - proxy mode (default): launched by AI client via stdio, forwards to daemon
+// - daemon mode (--daemon): persistent, owns extension connection, routes requests
+// - proxy auto-forks daemon on first start if not running
+// - daemon auto-exits after 5 min idle (no proxies connected)
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -16,98 +20,34 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { WebSocketServer, WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
-import net from "node:net";
+import { spawn } from "node:child_process";
+import { appendFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const WS_PORT = Number(process.env.MCP_WS_PORT || 8787);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
-// ---------- WebSocket server (extension connects here) ----------
+const WS_EXT_PORT = Number(process.env.MCP_WS_PORT || 8787);   // extension → daemon
+const WS_PROXY_PORT = Number(process.env.MCP_PROXY_PORT || 8788); // proxy → daemon
+const DAEMON_IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 min no proxies → exit
+const DAEMON_LOG = join(__dirname, "daemon.log");
 
-let wss = null;
-let extensionSocket = null;
-const pending = new Map(); // id -> {resolve, reject, timer}
-let shuttingDown = false;
+const isDaemon = process.argv.includes("--daemon");
 
-function attachConnectionHandler(wss) {
-  wss.on("connection", (socket, req) => {
-    // Only allow localhost connections
-    const ip = req.socket.remoteAddress;
-    if (ip !== "127.0.0.1" && ip !== "::1" && ip !== "::ffff:127.0.0.1") {
-      socket.close();
-      return;
-    }
-    console.error(`[MCP] Extension connected from ${ip}`);
-    extensionSocket = socket;
+// ---------- Logging ----------
 
-    socket.on("message", (data) => {
-      let msg;
-      try { msg = JSON.parse(data.toString()); } catch { return; }
-      if (msg.type === "hello") {
-        console.error(`[MCP] Hello from extension v${msg.version}`);
-        return;
-      }
-      if (msg.type === "ping") return; // keepalive
-      // Allow a new MCP server instance to request shutdown of this old instance
-      // so that it can take over the port (handled in startServer()).
-      if (msg.type === "shutdown") {
-        console.error(`[MCP] Shutdown requested by new instance: ${msg.reason || "unknown"}`);
-        try { socket.send(JSON.stringify({ type: "shutdown_ack" })); } catch {}
-        shuttingDown = true;
-        // Reject all pending requests so the AI client gets errors instead of hangs
-        for (const [id, p] of pending) {
-          clearTimeout(p.timer);
-          p.reject(new Error("Server shutting down (replaced by new instance)"));
-          pending.delete(id);
-        }
-        try { extensionSocket.close(); } catch {}
-        setTimeout(() => process.exit(0), 200);
-        return;
-      }
-      if (msg.type === "response") {
-        const p = pending.get(msg.id);
-        if (!p) return;
-        clearTimeout(p.timer);
-        pending.delete(msg.id);
-        if (msg.error) p.reject(new Error(msg.error.message || "Extension error"));
-        else p.resolve(msg.result);
-        return;
-      }
-      if (msg.type === "event") {
-        // Forward notable events to stderr (MCP logs go to stderr; stdout is reserved for protocol)
-        console.error(`[MCP] Event: ${JSON.stringify(msg.event)}`);
-      }
-    });
-
-    socket.on("close", () => {
-      console.error("[MCP] Extension disconnected");
-      if (extensionSocket === socket) extensionSocket = null;
-      if (shuttingDown) return;
-      // Reject all pending
-      for (const [id, p] of pending) {
-        clearTimeout(p.timer);
-        p.reject(new Error("Extension disconnected"));
-        pending.delete(id);
-      }
-    });
-  });
+function log(...args) {
+  const ts = new Date().toISOString();
+  const line = `[${ts}] ${args.join(" ")}\n`;
+  if (isDaemon) {
+    try { appendFileSync(DAEMON_LOG, line); } catch {}
+  } else {
+    process.stderr.write(line);
+  }
 }
 
-function sendToExtension(method, params, timeoutMs = 30000) {
-  return new Promise((resolve, reject) => {
-    if (!extensionSocket || extensionSocket.readyState !== extensionSocket.OPEN) {
-      reject(new Error("Chrome extension not connected. Open Chrome and click the extension icon to connect."));
-      return;
-    }
-    const id = randomUUID();
-    const timer = setTimeout(() => {
-      pending.delete(id);
-      reject(new Error(`Request timed out after ${timeoutMs}ms: ${method}`));
-    }, timeoutMs);
-    pending.set(id, { resolve, reject, timer });
-    extensionSocket.send(JSON.stringify({ type: "request", id, method, params: params || {} }));
-  });
-}
-
-// ---------- MCP tool definitions ----------
+// ---------- Tool definitions (shared: proxy for ListTools, daemon for reference) ----------
 
 const TOOLS = [
   {
@@ -395,19 +335,9 @@ const TOOLS = [
   }
 ];
 
-// ---------- MCP server setup ----------
+// ---------- Tool call mapping (daemon uses this to translate tool name → extension method) ----------
 
-const server = new Server(
-  { name: "chrome-mcp-bridge", version: "0.1.0" },
-  { capabilities: { tools: {} } }
-);
-
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: TOOLS
-}));
-
-server.setRequestHandler(CallToolRequestSchema, async (req) => {
-  const { name, arguments: args = {} } = req.params;
+function mapToolCall(name, args = {}) {
   let method, params;
   switch (name) {
     case "chrome_navigate":       method = "navigate";       params = { url: args.url }; break;
@@ -454,172 +384,375 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
-
-  try {
-    // wait_* tools may need longer than 30s — use the user's timeout + 2s buffer.
-    const rpcTimeout = (name === "chrome_wait_for" || name === "chrome_wait_for_request")
-      ? Math.max(30000, (args.timeout || (name === "chrome_wait_for_request" ? 15000 : 10000)) + 2000)
-      : 30000;
-    const result = await sendToExtension(method, params, rpcTimeout);
-    // For screenshot, return as image content
-    if (name === "chrome_screenshot" && result?.image) {
-      const base64 = String(result.image).replace(/^data:image\/png;base64,/, "");
-      return {
-        content: [
-          { type: "image", data: base64, mimeType: "image/png" }
-        ]
-      };
-    }
-    // Default: return as JSON text
-    return {
-      content: [
-        { type: "text", text: JSON.stringify(result, null, 2) }
-      ]
-    };
-  } catch (err) {
-    return {
-      isError: true,
-      content: [{ type: "text", text: `Error: ${err.message}` }]
-    };
-  }
-});
-
-// ---------- Start ----------
-
-// Probe whether a TCP port is already in use on 127.0.0.1.
-// Resolves true if something is listening, false otherwise.
-function isPortInUse(port) {
-  return new Promise((resolve) => {
-    const tester = net.createServer();
-    tester.once("error", (err) => resolve(err.code === "EADDRINUSE"));
-    tester.once("listening", () => {
-      tester.close(() => resolve(false));
-    });
-    tester.listen(port, "127.0.0.1");
-  });
+  const rpcTimeout = (name === "chrome_wait_for" || name === "chrome_wait_for_request")
+    ? Math.max(30000, (args.timeout || (name === "chrome_wait_for_request" ? 15000 : 10000)) + 2000)
+    : 30000;
+  return { method, params, rpcTimeout };
 }
 
-// Try to gracefully shut down a previous instance of ourselves that may still
-// be holding the WebSocket port. We connect as a plain WebSocket client and
-// send a "shutdown" message; the existing server's message handler will
-// close all sockets and exit(0) on receipt.
-// Returns true if a shutdown_ack was received, false otherwise.
-function shutdownExistingInstance(port) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (ok, reason) => {
-      if (settled) return;
-      settled = true;
-      try { client.close(); } catch {}
-      if (!ok) console.error(`[MCP] shutdown client gave up: ${reason}`);
-      resolve(ok);
-    };
-    const client = new WebSocket(`ws://127.0.0.1:${port}`);
-    const timer = setTimeout(() => finish(false, "timeout after 3s"), 3000);
-    client.on("open", () => {
-      console.error("[MCP] Connected to existing instance, sending shutdown...");
+// ---------- Build MCP response content from daemon result ----------
+
+function buildMcpResponse(name, result) {
+  if (name === "chrome_screenshot" && result?.image) {
+    const base64 = String(result.image).replace(/^data:image\/png;base64,/, "");
+    return { content: [{ type: "image", data: base64, mimeType: "image/png" }] };
+  }
+  return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+}
+
+// =====================================================================
+// PROXY MODE (default — launched by AI client via stdio)
+// =====================================================================
+
+async function runProxy() {
+  let daemonWs = null;
+  const pending = new Map(); // id -> {resolve, reject, timer}
+
+  // Try connecting to daemon; if not running, fork it.
+  async function ensureDaemon() {
+    // Try connecting first (daemon might already be running)
+    for (let i = 0; i < 3; i++) {
       try {
-        client.send(JSON.stringify({
-          type: "shutdown",
-          reason: "new_instance_starting",
-          ts: Date.now()
-        }));
-      } catch (e) {
-        finish(false, `send failed: ${e.message}`);
+        daemonWs = await connectDaemon();
+        log("[Proxy] Connected to existing daemon.");
+        return;
+      } catch {
+        // daemon not running, will fork below
       }
+    }
+
+    // Fork daemon
+    log("[Proxy] Daemon not running, forking...");
+    const child = spawn(process.execPath, [__filename, "--daemon"], {
+      detached: true,
+      stdio: "ignore",
+      cwd: __dirname,
+      env: { ...process.env },
     });
-    client.on("message", (data) => {
-      let msg;
-      try { msg = JSON.parse(data.toString()); } catch { return; }
-      if (msg.type === "shutdown_ack") {
+    child.unref();
+    log(`[Proxy] Forked daemon PID ${child.pid}. Waiting for it to start...`);
+
+    // Wait for daemon to start listening, then connect
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      try {
+        daemonWs = await connectDaemon();
+        log("[Proxy] Connected to newly forked daemon.");
+        return;
+      } catch {
+        // keep retrying
+      }
+    }
+    throw new Error("Failed to connect to daemon after forking. Check daemon.log for errors.");
+  }
+
+  function connectDaemon() {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${WS_PROXY_PORT}`);
+      const timer = setTimeout(() => {
+        try { ws.close(); } catch {}
+        reject(new Error("connect timeout"));
+      }, 1000);
+      ws.on("open", () => {
         clearTimeout(timer);
-        console.error("[MCP] Shutdown acknowledged by previous instance.");
-        // Give the old process a moment to release the port
-        setTimeout(() => finish(true, "ack"), 300);
+        resolve(ws);
+      });
+      ws.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
+
+  // Forward a tool call to daemon and await response
+  function sendToDaemon(name, args, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      if (!daemonWs || daemonWs.readyState !== WebSocket.OPEN) {
+        reject(new Error("Not connected to daemon"));
+        return;
       }
+      const id = randomUUID();
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`Daemon request timed out after ${timeoutMs}ms: ${name}`));
+      }, timeoutMs);
+      pending.set(id, { resolve, reject, timer });
+      daemonWs.send(JSON.stringify({ type: "request", id, name, args }));
     });
-    client.on("error", (err) => {
-      clearTimeout(timer);
-      finish(false, `ws error: ${err.message}`);
-    });
-    client.on("unexpected-response", (req, res) => {
-      clearTimeout(timer);
-      finish(false, `unexpected HTTP ${res.statusCode}`);
-    });
+  }
+
+  await ensureDaemon();
+
+  // Handle daemon messages
+  daemonWs.on("message", (data) => {
+    let msg;
+    try { msg = JSON.parse(data.toString()); } catch { return; }
+    if (msg.type === "response") {
+      const p = pending.get(msg.id);
+      if (!p) return;
+      clearTimeout(p.timer);
+      pending.delete(msg.id);
+      p.resolve(msg.result);
+      return;
+    }
+    if (msg.type === "error") {
+      const p = pending.get(msg.id);
+      if (!p) return;
+      clearTimeout(p.timer);
+      pending.delete(msg.id);
+      p.reject(new Error(msg.error));
+      return;
+    }
+    if (msg.type === "warning") {
+      // Forward warnings to stderr (AI client may surface them)
+      log(`[Proxy] Warning from daemon: ${msg.msg}`);
+    }
   });
-}
 
-// Wait until the port is free, polling up to `attempts` times.
-async function waitForPortFree(port, attempts = 20, intervalMs = 100) {
-  for (let i = 0; i < attempts; i++) {
-    if (!(await isPortInUse(port))) return true;
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  return false;
-}
-
-async function startServer() {
-  // If the port is already in use, try to negotiate a graceful shutdown of
-  // the previous instance. This handles the common case of an AI client
-  // (Trae/Cursor/etc.) toggling the MCP server off and on without properly
-  // SIGTERM-ing the previous subprocess — the orphaned server keeps the port.
-  if (await isPortInUse(WS_PORT)) {
-    console.error(`[MCP] Port ${WS_PORT} is in use — attempting graceful takeover...`);
-    const acked = await shutdownExistingInstance(WS_PORT);
-    if (acked) {
-      console.error("[MCP] Previous instance acknowledged shutdown. Waiting for port release...");
-    } else {
-      console.error("[MCP] Previous instance did not respond to shutdown. It may be a non-MCP process.");
+  daemonWs.on("close", () => {
+    log("[Proxy] Daemon connection closed.");
+    // Reject all pending requests
+    for (const [id, p] of pending) {
+      clearTimeout(p.timer);
+      p.reject(new Error("Daemon connection lost"));
+      pending.delete(id);
     }
-    const freed = await waitForPortFree(WS_PORT, 30, 100);
-    if (!freed) {
-      console.error(`[MCP] ERROR: Port ${WS_PORT} still in use after 3s.`);
-      console.error("[MCP] Hint: find and kill the process holding the port:");
-      console.error(`[MCP]   netstat -ano | findstr :${WS_PORT}`);
-      console.error("[MCP]   taskkill /F /PID <pid>");
-      process.exit(1);
-    }
-    console.error(`[MCP] Port ${WS_PORT} is now free.`);
-  }
+  });
 
-  // Create the WebSocketServer now that the port is available.
-  wss = new WebSocketServer({ port: WS_PORT, host: "127.0.0.1" });
-  attachConnectionHandler(wss);
+  daemonWs.on("error", (err) => {
+    log(`[Proxy] Daemon WebSocket error: ${err.message}`);
+  });
 
-  wss.on("error", (err) => {
-    if (err.code === "EADDRINUSE") {
-      console.error(`[MCP] FATAL: Port ${WS_PORT} became busy between probe and listen.`);
-      console.error("[MCP] This is a race condition; please restart the MCP server.");
-      process.exit(1);
-    } else {
-      console.error("[MCP] WebSocket server error:", err.message);
+  // MCP server setup
+  const server = new Server(
+    { name: "chrome-mcp-bridge", version: "0.2.0" },
+    { capabilities: { tools: {} } }
+  );
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+
+  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+    const { name, arguments: args = {} } = req.params;
+    try {
+      // Use a generous timeout: wait_for tools may need up to 60s
+      const { rpcTimeout } = mapToolCall(name, args);
+      const result = await sendToDaemon(name, args, rpcTimeout);
+      return buildMcpResponse(name, result);
+    } catch (err) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Error: ${err.message}` }]
+      };
     }
   });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`[MCP] Server listening on stdio. WebSocket on ws://127.0.0.1:${WS_PORT}`);
-  console.error("[MCP] Waiting for Chrome extension to connect...");
+  log("[Proxy] MCP server listening on stdio. Forwarding to daemon.");
 
-  // CRITICAL: When the AI client (Trae/Cursor/etc.) closes the MCP server
-  // toggle, it closes our stdin pipe but does NOT send SIGTERM on Windows.
-  // Node.js does NOT exit on stdin close by default, so the orphaned process
-  // would keep holding the WebSocket port forever, causing EADDRINUSE on the
-  // next start. Force-exit when stdin closes.
+  // When AI client disconnects (closes stdin), clean up
   process.stdin.on("end", () => {
-    console.error("[MCP] stdin closed — AI client disconnected. Shutting down.");
-    shuttingDown = true;
-    try { if (extensionSocket) extensionSocket.close(); } catch {}
-    try { if (wss) wss.close(); } catch {}
-    setTimeout(() => process.exit(0), 200);
+    log("[Proxy] stdin closed — AI client disconnected.");
+    try { if (daemonWs) daemonWs.close(); } catch {}
+    setTimeout(() => process.exit(0), 100);
   });
   process.stdin.on("error", (err) => {
-    console.error("[MCP] stdin error:", err.message);
+    log(`[Proxy] stdin error: ${err.message}`);
   });
 }
 
-await startServer();
+// =====================================================================
+// DAEMON MODE (--daemon flag, persistent background process)
+// =====================================================================
 
-// Handle stop_requested events from extension (forwarded as warnings via stderr).
-// A real cancellation would require MCP server support for cancellation notifications,
-// which is left as a future enhancement.
+async function runDaemon() {
+  // Truncate log file on start
+  try { writeFileSync(DAEMON_LOG, `Daemon starting at ${new Date().toISOString()}\n`); } catch {}
+
+  let extensionSocket = null;
+  const proxies = new Set();        // Set<WebSocket> of connected proxies
+  const extPending = new Map();      // extRequestId -> {resolve, reject, timer, proxyWs, proxyReqId}
+  let lastActivity = Date.now();
+  let idleCheckTimer = null;
+
+  function touchActivity() {
+    lastActivity = Date.now();
+  }
+
+  function scheduleIdleCheck() {
+    if (idleCheckTimer) clearTimeout(idleCheckTimer);
+    idleCheckTimer = setTimeout(() => {
+      if (proxies.size === 0 && extPending.size === 0) {
+        const idleMs = Date.now() - lastActivity;
+        if (idleMs > DAEMON_IDLE_TIMEOUT_MS) {
+          log(`[Daemon] Idle for ${Math.round(idleMs / 1000)}s with no proxies. Exiting.`);
+          try { if (extensionSocket) extensionSocket.close(); } catch {}
+          process.exit(0);
+        }
+      }
+      scheduleIdleCheck();
+    }, 30000);
+  }
+
+  // ---------- Send request to extension ----------
+  function sendToExtension(method, params, timeoutMs, proxyWs, proxyReqId) {
+    return new Promise((resolve, reject) => {
+      if (!extensionSocket || extensionSocket.readyState !== WebSocket.OPEN) {
+        reject(new Error("Chrome extension not connected. Open Chrome and click the extension icon to connect."));
+        return;
+      }
+      const extId = randomUUID();
+      const timer = setTimeout(() => {
+        extPending.delete(extId);
+        reject(new Error(`Request timed out after ${timeoutMs}ms: ${method}`));
+      }, timeoutMs);
+      extPending.set(extId, { resolve, reject, timer, proxyWs, proxyReqId });
+      extensionSocket.send(JSON.stringify({ type: "request", id: extId, method, params: params || {} }));
+    });
+  }
+
+  // ---------- Extension WebSocket server (port 8787) ----------
+  const extWss = new WebSocketServer({ port: WS_EXT_PORT, host: "127.0.0.1" });
+  log(`[Daemon] Extension WS server listening on ws://127.0.0.1:${WS_EXT_PORT}`);
+
+  extWss.on("connection", (socket, req) => {
+    const ip = req.socket.remoteAddress;
+    if (ip !== "127.0.0.1" && ip !== "::1" && ip !== "::ffff:127.0.0.1") {
+      socket.close();
+      return;
+    }
+    log(`[Daemon] Extension connected from ${ip}`);
+    extensionSocket = socket;
+    touchActivity();
+
+    socket.on("message", (data) => {
+      let msg;
+      try { msg = JSON.parse(data.toString()); } catch { return; }
+      if (msg.type === "hello") {
+        log(`[Daemon] Hello from extension v${msg.version}`);
+        return;
+      }
+      if (msg.type === "ping") return;
+      if (msg.type === "response") {
+        const p = extPending.get(msg.id);
+        if (!p) return;
+        clearTimeout(p.timer);
+        extPending.delete(msg.id);
+        touchActivity();
+        if (msg.error) {
+          p.reject(new Error(msg.error.message || "Extension error"));
+        } else {
+          p.resolve(msg.result);
+        }
+        return;
+      }
+      if (msg.type === "event") {
+        log(`[Daemon] Event: ${JSON.stringify(msg.event)}`);
+      }
+    });
+
+    socket.on("close", () => {
+      log("[Daemon] Extension disconnected");
+      if (extensionSocket === socket) extensionSocket = null;
+      // Reject all pending extension requests
+      for (const [id, p] of extPending) {
+        clearTimeout(p.timer);
+        p.reject(new Error("Extension disconnected"));
+        extPending.delete(id);
+      }
+      touchActivity();
+    });
+  });
+
+  extWss.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      log(`[Daemon] FATAL: Port ${WS_EXT_PORT} already in use. Another daemon may be running.`);
+      log(`[Daemon] Hint: netstat -ano | findstr :${WS_EXT_PORT}`);
+      process.exit(1);
+    } else {
+      log(`[Daemon] Extension WS error: ${err.message}`);
+    }
+  });
+
+  // ---------- Proxy WebSocket server (port 8788) ----------
+  const proxyWss = new WebSocketServer({ port: WS_PROXY_PORT, host: "127.0.0.1" });
+  log(`[Daemon] Proxy WS server listening on ws://127.0.0.1:${WS_PROXY_PORT}`);
+
+  proxyWss.on("connection", (socket, req) => {
+    const ip = req.socket.remoteAddress;
+    if (ip !== "127.0.0.1" && ip !== "::1" && ip !== "::ffff:127.0.0.1") {
+      socket.close();
+      return;
+    }
+    log(`[Daemon] Proxy connected from ${ip}`);
+    proxies.add(socket);
+    touchActivity();
+
+    socket.on("message", async (data) => {
+      let msg;
+      try { msg = JSON.parse(data.toString()); } catch { return; }
+      if (msg.type !== "request") return;
+
+      const { id: proxyReqId, name, args } = msg;
+      touchActivity();
+
+      try {
+        const { method, params, rpcTimeout } = mapToolCall(name, args);
+        const result = await sendToExtension(method, params, rpcTimeout, socket, proxyReqId);
+        try {
+          socket.send(JSON.stringify({ type: "response", id: proxyReqId, result }));
+        } catch {}
+      } catch (err) {
+        try {
+          socket.send(JSON.stringify({ type: "error", id: proxyReqId, error: err.message }));
+        } catch {}
+      }
+    });
+
+    socket.on("close", () => {
+      log("[Daemon] Proxy disconnected");
+      proxies.delete(socket);
+      // Reject pending requests from this proxy
+      for (const [extId, p] of extPending) {
+        if (p.proxyWs === socket) {
+          clearTimeout(p.timer);
+          p.reject(new Error("Proxy disconnected"));
+          extPending.delete(extId);
+        }
+      }
+      touchActivity();
+    });
+
+    socket.on("error", (err) => {
+      log(`[Daemon] Proxy WS error: ${err.message}`);
+    });
+  });
+
+  proxyWss.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      log(`[Daemon] FATAL: Proxy port ${WS_PROXY_PORT} already in use. Another daemon may be running.`);
+      process.exit(1);
+    } else {
+      log(`[Daemon] Proxy WS error: ${err.message}`);
+    }
+  });
+
+  scheduleIdleCheck();
+  log("[Daemon] Waiting for Chrome extension and proxies to connect...");
+}
+
+// =====================================================================
+// Main
+// =====================================================================
+
+if (isDaemon) {
+  runDaemon().catch((err) => {
+    log(`[Daemon] Fatal: ${err.message}`);
+    process.exit(1);
+  });
+} else {
+  runProxy().catch((err) => {
+    log(`[Proxy] Fatal: ${err.message}`);
+    process.exit(1);
+  });
+}
